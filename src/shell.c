@@ -18,6 +18,8 @@
 #include "strlib.h"
 #include "sim7600.h"
 #include "wait.h"
+#include "mqtt.h"
+#include "timer.h"
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -35,7 +37,10 @@ void processShellCmd(char* line) {
     //putsUart0("\n");
     shell_cmd data;
     int valid = 0;
-    str_copy(data.buffer, line);
+    if (!str_ncopy(data.buffer, line, sizeof(data.buffer))) {
+        putsUart0("Command too long\n>");
+        return;
+    }
     parseFields(&data);
     if (isCommand(&data, "mode", 1)) {
         valid = 1;
@@ -48,6 +53,9 @@ void processShellCmd(char* line) {
             uartMode = SHELL_MODE;
             putsUart0("Switched to MCU Shell mode.\n");
         }
+        else {
+            putsUart0("Usage: mode at|shell\n");
+        }
         putcUart0('>');
         return;
     }
@@ -59,8 +67,25 @@ void processShellCmd(char* line) {
         //process commands for MCU
         if (isCommand(&data, "sms", 2)) {
             valid = 1;
-            char* number = getFieldString(&data, 1);
-            char* msg = &line[data.fieldPosition[2]];
+            putsUart0("sms: not implemented\n");
+        }
+        if (isCommand(&data, "status", 0)) {
+            char num[11];
+            valid = 1;
+            putsUart0("uptime s: ");
+            to_string(getUptimeSeconds(), num, 10);
+            putsUart0(num);
+            putsUart0("\nmodem: ");
+            putsUart0(getSim7600StateName());
+            putsUart0(", resets: ");
+            to_string(getSim7600ResetCount(), num, 10);
+            putsUart0(num);
+            putsUart0("\nmqtt: ");
+            putsUart0(getMqttStateName());
+            putsUart0("\nuart1 rx errors: ");
+            to_string(getUart1RxErrorCount(), num, 10);
+            putsUart0(num);
+            putsUart0("\n");
         }
         if (isCommand(&data, "preempt", 1)) {
             valid = 1;
@@ -159,28 +184,20 @@ char* getFieldString(shell_cmd* data, uint8_t fieldNumber) {
     }
 }
 
+// returns 0 if the field does not exist or is not numeric
 int32_t getFieldInteger(shell_cmd* data, uint8_t fieldNumber) {
-    if (fieldNumber < MAX_FIELDS) {
-        if (data->fieldType[fieldNumber] == 'n') {
-            return to_uint32((const char*)&(data->buffer[data->fieldPosition[fieldNumber]]), 10);
-        }
+    if (fieldNumber < data->fieldCount && data->fieldType[fieldNumber] == 'n') {
+        return to_uint32((const char*)&(data->buffer[data->fieldPosition[fieldNumber]]), 10);
     }
-    else {
-        return NULL;
-    }
-    return NULL;
+    return 0;
 }
 
+// hex digits a-f parse as alpha fields, so accept either field type here
 uint32_t getFieldHexInteger(shell_cmd* data, uint8_t fieldNumber) {
-    if (fieldNumber < MAX_FIELDS) {
-        if (data->fieldType[fieldNumber] == 'n') {
-            return to_uint32((const char*)&(data->buffer[data->fieldPosition[fieldNumber]]), 16);
-        }
+    if (fieldNumber < data->fieldCount) {
+        return to_uint32((const char*)&(data->buffer[data->fieldPosition[fieldNumber]]), 16);
     }
-    else {
-        return NULL;
-    }
-    return NULL;
+    return 0;
 }
 
 bool isCommand(shell_cmd* data, const char strCommand[], uint8_t minArguments) {

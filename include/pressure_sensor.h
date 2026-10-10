@@ -20,6 +20,7 @@
 #define PRESSURE_H_
 
 #define PRESSURE PORTE, 3      // AIN0, pressure sensor input
+#define PRESSURE_ADC_ERROR 0xFFFFFFFF
 
 //-----------------------------------------------------------------------------
 // Subroutines

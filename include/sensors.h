@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 
+void initSensors();
 uint8_t readValvePosition();
 float readFlowMeter();
 float readPressure();

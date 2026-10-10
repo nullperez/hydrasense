@@ -41,6 +41,7 @@ uint8_t startPeriodicTimer(_tim_callback_t callback, uint32_t seconds, void* con
 bool stopTimer(uint8_t id);
 bool restartTimer(uint8_t id);
 void tickIsr();
+uint32_t getUptimeSeconds();
 void seed_rng();
 uint32_t getTicks();
 uint32_t rand32();

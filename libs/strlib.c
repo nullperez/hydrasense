@@ -40,13 +40,35 @@ char* str_char(const char* str, char c) {
     return NULL;
 }
 
-//src MUST be null terminated
+//src MUST be null terminated, dest MUST be large enough. Prefer str_ncopy.
 void str_copy(char dest[], const char* src) {
     uint32_t i;
     for (i = 0; src[i] != 0; i++) {
         dest[i] = src[i];
     }
     dest[i] = 0;
+}
+
+//copies at most size-1 chars and always null terminates. returns false if src was truncated
+bool str_ncopy(char dest[], const char* src, uint32_t size) {
+    uint32_t i;
+    if (size == 0) {
+        return false;
+    }
+    for (i = 0; src[i] != 0 && i < size - 1; i++) {
+        dest[i] = src[i];
+    }
+    dest[i] = 0;
+    return src[i] == 0;
+}
+
+bool str_starts_with(const char* str, const char* prefix) {
+    while (*prefix != 0) {
+        if (*str++ != *prefix++) {
+            return false;
+        }
+    }
+    return true;
 }
 
 
@@ -99,55 +121,64 @@ char* str_tokenize(char* str, const char* delim) {
 }
 
 void str_to_lower(char* str) {
-
+    for (; *str != 0; str++) {
+        *str = to_lower(*str);
+    }
 }
 
 void str_to_upper(char* str) {
-
+    for (; *str != 0; str++) {
+        *str = to_upper(*str);
+    }
 }
 
 char to_lower(char c) {
-
-    return c;
+    return (c >= 'A' && c <= 'Z') ? (c + 32) : c;
 }
 
 char to_upper(char c) {
-    return c;
+    return (c >= 'a' && c <= 'z') ? (c - 32) : c;
 }
 
+//out must hold at least 33 chars for base 2, 11 for base 10. bases outside 2-36 output ""
 void to_string(uint32_t n, char* out, uint32_t b) {
-    char num[10];
+    char num[32];
     uint32_t i = 0;
-    uint64_t j = 1;
     uint32_t c;
-    if (n == 0) {
-        out[0] = '0';
-        out[1] = 0;
+    if (b < 2 || b > 36) {
+        out[0] = 0;
         return;
     }
-    for (c = n; c > 0; c /= b) {
-        uint64_t r = ((n % (j*b))/j);
-        char digit = (r < 10) ? (48 + r) : (65 + r - 10);
-        num[i] = digit;
-        j *= b;
-        i++;
-    }
+    do {
+        uint32_t r = n % b;
+        num[i++] = (r < 10) ? ('0' + r) : ('A' + r - 10);
+        n /= b;
+    } while (n > 0);
     for (c = 0; c < i; c++) {
         out[c] = num[i-c-1];
     }
     out[c] = 0;
 }
 
+//parses digits until the first invalid char for the base. accepts upper/lower case hex digits
 uint32_t to_uint32(const char* str, uint32_t base) {
-    int32_t i;
     uint32_t n = 0;
-    uint32_t p = 1;
-    uint32_t len = str_length(str);
-    char digit;
-    for (i = len-1; i >= 0; i--) {
-        digit = (str[i] >= '0' && str[i] <= '9') ? str[i]-48 : str[i]-55;
-        n += (digit)*p;
-        p*=base;
+    for (; *str != 0; str++) {
+        char c = to_upper(*str);
+        uint32_t digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        }
+        else if (c >= 'A' && c <= 'Z') {
+            digit = c - 'A' + 10;
+        }
+        else {
+            break;
+        }
+        if (digit >= base) {
+            break;
+        }
+        n = n*base + digit;
     }
     return n;
 }

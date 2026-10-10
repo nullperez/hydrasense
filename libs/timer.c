@@ -38,6 +38,7 @@ typedef struct {
 } timer_t;
 
 timer_t timers[NUM_TIMERS];
+static volatile uint32_t uptimeSeconds = 0;
 
 //-----------------------------------------------------------------------------
 // Subroutines
@@ -52,11 +53,8 @@ void initTimer() {
     TIMER4_CTL_R &= ~TIMER_CTL_TAEN;                 // turn-off timer before reconfiguring
     TIMER4_CFG_R = TIMER_CFG_32_BIT_TIMER;           // configure as 32-bit timer (A+B)
     TIMER4_TAMR_R = TIMER_TAMR_TAMR_PERIOD;          // configure for periodic mode (count down)
-    TIMER4_TAILR_R = 40000000;                       // set load value (1 Hz rate)
-    TIMER4_CTL_R |= TIMER_CTL_TAEN;                  // turn-on timer
-    TIMER4_IMR_R |= TIMER_IMR_TATOIM;                // turn-on interrupt
-    NVIC_EN2_R |= 1 << (INT_TIMER4A-80);             // turn-on interrupt 86 (TIMER4A)
-    for (i = 0; i < NUM_TIMERS; i++) {
+    TIMER4_TAILR_R = 40000000 - 1;                   // set load value (1 Hz rate)
+    for (i = 0; i < NUM_TIMERS; i++) {               // clear table before the ISR can run
         timers[i].callback = NULL;
         timers[i].context = NULL;
         timers[i].exp_time = 0;
@@ -64,10 +62,16 @@ void initTimer() {
         timers[i].reload = false;
         timers[i].active = false;
     }
+    TIMER4_CTL_R |= TIMER_CTL_TAEN;                  // turn-on timer
+    TIMER4_IMR_R |= TIMER_IMR_TATOIM;                // turn-on interrupt
+    NVIC_EN2_R |= 1 << (INT_TIMER4A-80);             // turn-on interrupt 86 (TIMER4A)
 }
 
 uint8_t startOneshotTimer(_tim_callback_t callback, uint32_t seconds, void* context) {
     uint8_t i = 0;
+    if (callback == NULL || seconds == 0) {
+        return INVALID_TIMER;
+    }
     for (i = 0; i < NUM_TIMERS; i++) {
         if (!timers[i].active) {
             timers[i].exp_time = seconds;
@@ -84,6 +88,9 @@ uint8_t startOneshotTimer(_tim_callback_t callback, uint32_t seconds, void* cont
 
 uint8_t startPeriodicTimer(_tim_callback_t callback, uint32_t seconds, void* context) {
     uint8_t i = 0;
+    if (callback == NULL || seconds == 0) {
+        return INVALID_TIMER;
+    }
     for (i = 0; i < NUM_TIMERS; i++) {
         if (!timers[i].active) {
             timers[i].exp_time = seconds;
@@ -133,17 +140,28 @@ bool restartTimer(uint8_t id) {
      return found;
 }*/
 
-// 1 second ticks
+// seconds since initTimer(). wraps after ~136 years, subtract timestamps to get elapsed time
+uint32_t getUptimeSeconds() {
+    return uptimeSeconds;
+}
+
+// 1 second ticks. callbacks run in interrupt context: keep them short (e.g. set a flag)
 void tickIsr() {
     uint8_t i;
+    uptimeSeconds++;
     for (i = 0; i < NUM_TIMERS; i++) {
-        if (timers[i].rem_time != 0) {
+        if (timers[i].active && timers[i].rem_time != 0) {
             timers[i].rem_time--;
             if (timers[i].rem_time == 0) {
                 if (timers[i].reload) {
                     timers[i].rem_time = timers[i].exp_time;
                 }
-                (*timers[i].callback)(timers[i].context);
+                else {
+                    timers[i].active = false;    // free the slot for one-shot timers
+                }
+                if (timers[i].callback) {
+                    (*timers[i].callback)(timers[i].context);
+                }
             }
         }
     }

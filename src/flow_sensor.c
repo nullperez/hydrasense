@@ -53,8 +53,12 @@ void initFlow()
 }
 
 // returns the edges counted by WT0 in the flow sensor after secWait seconds
+// BLOCKS for secWait seconds: never call from an ISR, and keep it below the watchdog timeout
 uint32_t getFlowRaw(uint8_t secWait)
 {
+    if (secWait == 0) {
+        return 0;                       // waitMicrosecond(0) would wrap and wait ~71 minutes
+    }
     WTIMER0_TAV_R = 0;                  //reset WT0 edge count
     waitMicrosecond(1000000*secWait);           // wait x seconds
     return WTIMER0_TAV_R;
@@ -63,15 +67,16 @@ uint32_t getFlowRaw(uint8_t secWait)
 // return the calculated GPM value from getFlowRaw() results
 float getFlowFromRaw(uint32_t raw)
 {
-    return (0.0618*raw) + 0.0328;
+    if (raw == 0) {
+        return 0;                       // no pulses = no flow (the fit's offset would report 0.03)
+    }
+    return (0.0618f*raw) + 0.0328f;
 }
 
 // return calculated GPM value from edge counts in secWait seconds
 float getFlowGpm(uint8_t secWait)
 {
-    WTIMER0_TAV_R = 0;                  //reset WT0 edge count
-    waitMicrosecond(1000000*secWait);           // wait x seconds
-    return (0.0618*WTIMER0_TAV_R) + 0.0328;
+    return getFlowFromRaw(getFlowRaw(secWait));
 }
 
 

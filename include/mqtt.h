@@ -1,14 +1,18 @@
 #ifndef MQTT_H_
 #define MQTT_H_
 
-#define MQTT_NOTRUNNING 0
-#define MQTT_STARTING 1
-#define MQTT_ 2
+#include <stdint.h>
+#include <stdbool.h>
 
-void startMqttClient();
-void mqttAcquireClient(const char* cid);
-void mqttConnect();
+#define MQTT_MAX_TOPIC      32
+#define MQTT_MAX_PAYLOAD    64
+
+void mqttReset();
 void mqttHandler();
-void processMqttResponse(char* resp);
+void processMqttResponse(const char* resp);
+bool mqttIsConnected();
+bool mqttPublish(const char* topic, const char* data);
+uint8_t getMqttState();
+const char* getMqttStateName();
 
 #endif /* MQTT_H_ */

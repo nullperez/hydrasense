@@ -80,3 +80,5 @@ ccsproject/
 *~
 .DS_Store
 Thumbs.db
+# Local credentials
+include/secrets.h

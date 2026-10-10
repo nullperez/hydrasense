@@ -2,15 +2,20 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-void ring_buffer_put(ring_buffer* rb, uint8_t data) {
+//returns false (and drops the byte) if the buffer is full
+bool ring_buffer_put(ring_buffer* rb, uint8_t data) {
+    if (ring_buffer_full(rb)) {
+        return false;
+    }
     rb->buffer[rb->head] = data;
     rb->head++;
-    rb->head = (rb->head + 1) % rb->size;
     if (rb->head == rb->size) {
         rb->head = 0;
     }
+    return true;
 }
 
+//caller must check ring_buffer_empty() first
 uint8_t ring_buffer_get(ring_buffer* rb) {
     const uint8_t data = rb->buffer[rb->tail];
     rb->tail++;

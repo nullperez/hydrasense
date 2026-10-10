@@ -27,13 +27,16 @@
 //-----------------------------------------------------------------------------
 // Global variables
 //-----------------------------------------------------------------------------
+#ifndef UART_CALLBACK_T
+#define UART_CALLBACK_T
 typedef void (*uart_callback)(char* str);
+#endif
 //-----------------------------------------------------------------------------
 // Subroutines
 //-----------------------------------------------------------------------------
 
-inline void enableUart1RxInt(void);
-inline void disableUart1RxInt(void);
+void enableUart1RxInt(void);
+void disableUart1RxInt(void);
 void setUart1Callback(uart_callback fn);
 void initUart1(void);
 void setUart1BaudRate(uint32_t baudRate, uint32_t fcyc);
@@ -44,6 +47,8 @@ void putsUart1_int(const char* str);
 char getcUart1(void);
 bool isUart1RxFifoEmpty(void);
 void uart1Isr();
+void processUart1Lines(void);
+uint32_t getUart1RxErrorCount(void);
 
 
 #endif

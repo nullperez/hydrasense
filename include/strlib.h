@@ -32,6 +32,8 @@
 
 char* str_char(const char* str, char c);
 void str_copy(char dest[], const char* src);
+bool str_ncopy(char dest[], const char* src, uint32_t size);
+bool str_starts_with(const char* str, const char* prefix);
 bool str_equal(const char* str1, const char* str2);
 uint32_t str_length(const char str[]);
 char* str_tokenize(char* str, const char* delim);
