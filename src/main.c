@@ -16,11 +16,64 @@
 #include "nvic.h"
 #include "timer.h"
 #include "watchdog.h"
+#include "secrets.h"   // MQTTBROKER, MQTTPORT, MQTTUSER, MQTTPASS (copy secrets.example.h)
 
 #define PUBLISH_PERIOD_S 60
 #define WATCHDOG_TIMEOUT_S 15   // MCU resets after 2x this without a feed
 
+#define MODEM_RST PORTA,7
+
 static volatile bool publishPending = false;
+
+//-----------------------------------------------------------------------------
+// Board glue for the portable SIM7600 driver
+//-----------------------------------------------------------------------------
+
+static void modemSetResetPin(bool level) {
+    setPinValue(MODEM_RST, level);
+}
+
+static void consoleLog(const char* msg) {
+    putsUart0(msg);
+    putcUart0('\n');
+}
+
+static const sim7600_config modemConfig = {
+    .uartWrite = putsUart1,
+    .getSeconds = getUptimeSeconds,
+    .setResetPin = modemSetResetPin,
+    .log = consoleLog
+};
+
+static const mqtt_config mqttConfig = {
+    .host = MQTTBROKER,
+    .port = MQTTPORT,
+    .clientId = "TM4C",
+    .user = MQTTUSER,
+    .pass = MQTTPASS,
+    .keepAliveS = 60,
+    .qos = 2
+};
+
+static void initModem() {
+    printShell("Initializing UART1 (SIM7600A-H)\n");
+    initUart1();
+    setUart1BaudRate(115200, 40e6);
+    setUart1Callback(sim7600FeedLine);
+    enableUart1RxInt();
+    enableNvicInterrupt(INT_UART1);
+
+    enablePort(PORTA);
+    selectPinPushPullOutput(MODEM_RST);
+
+    if (!sim7600Init(&modemConfig) || !mqttInit(&mqttConfig)) {
+        printShell("Modem/MQTT config invalid\n");
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Application
+//-----------------------------------------------------------------------------
 
 // runs in the timer ISR: only flag the work, the main loop does it
 static void periodicCallback(void* context) {
@@ -64,7 +117,7 @@ int main(void) {
     initShell();
     printResetCause();
     initSensors();
-    initSim7600();
+    initModem();
     if (startPeriodicTimer(periodicCallback, PUBLISH_PERIOD_S, 0) == INVALID_TIMER) {
         printShell("Could not start publish timer\n");
     }

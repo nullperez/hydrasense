@@ -9,7 +9,7 @@
 #define SECRETS_H_
 
 #define MQTTBROKER "0.0.0.0"
-#define MQTTPORT "1883"
+#define MQTTPORT 1883
 
 #define MQTTUSER "user"
 #define MQTTPASS "password"

@@ -61,7 +61,7 @@ void processShellCmd(char* line) {
     }
     if (uartMode == AT_MODE) {
         //process raw AT commands
-        sendATCommand(line);
+        sim7600SendCommand(line);
     }
     else if (uartMode == SHELL_MODE) {
         //process commands for MCU
@@ -76,12 +76,12 @@ void processShellCmd(char* line) {
             to_string(getUptimeSeconds(), num, 10);
             putsUart0(num);
             putsUart0("\nmodem: ");
-            putsUart0(getSim7600StateName());
+            putsUart0(sim7600StateName());
             putsUart0(", resets: ");
-            to_string(getSim7600ResetCount(), num, 10);
+            to_string(sim7600ResetCount(), num, 10);
             putsUart0(num);
             putsUart0("\nmqtt: ");
-            putsUart0(getMqttStateName());
+            putsUart0(mqttStateName());
             putsUart0("\nuart1 rx errors: ");
             to_string(getUart1RxErrorCount(), num, 10);
             putsUart0(num);

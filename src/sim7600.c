@@ -1,20 +1,20 @@
-#include <stddef.h>
-#include "sim7600.h"
-#include "shell.h"
-#include "gpio.h"
-#include "uart0.h"
-#include "uart1.h"
-#include "nvic.h"
-#include "mqtt.h"
-#include "strlib.h"
-#include "timer.h"
-#include "wait.h"
-#include "watchdog.h"
-#include "tm4c123gh6pm.h"
+/*
+ * sim7600.c
+ *
+ * Portable SIM7600 modem driver, see sim7600.h. Depends only on the C library.
+ */
 
-#define RST PORTA,7
+#include "sim7600.h"
+#include <stddef.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
 
 typedef enum {
+    SIM_UNINITIALIZED,
+    SIM_RESET_ASSERT,       // hard reset sequence: reset pin low,
+    SIM_RESET_RELEASE,      //   high,
+    SIM_RESET_POWER_ON,     //   low again to power on, then high
     SIM_INITIALIZING,       // waiting for PB DONE after power up / reset
     SIM_DISABLING_ECHO,     // sent ATE0, waiting for OK
     SIM_CHECKING_SIM,       // sent AT+CPIN?, waiting for +CPIN: READY
@@ -24,25 +24,57 @@ typedef enum {
 } sim_state;
 
 static const char* const stateNames[SIM_STATE_COUNT] = {
+    "UNINITIALIZED", "RESET_ASSERT", "RESET_RELEASE", "RESET_POWER_ON",
     "INITIALIZING", "DISABLING_ECHO", "CHECKING_SIM", "WAITING_NETWORK", "RUNNING"
 };
 
-// seconds before a command is retried in each state, and how many tries before a hard reset
-static const uint8_t stateTimeouts[SIM_STATE_COUNT] = { 45, 5, 5, 3, 0 };
-static const uint8_t stateMaxTries[SIM_STATE_COUNT] = { 1, 3, 6, 60, 0 };
+// seconds spent in each state before acting (reset phases) or retrying a command,
+// and how many tries before a hard reset. 0 = no timeout
+static const uint8_t stateTimeouts[SIM_STATE_COUNT] = { 0, 5, 2, 3, 45, 5, 5, 3, 0 };
+static const uint8_t stateMaxTries[SIM_STATE_COUNT] = { 0, 0, 0, 0, 1, 3, 6, 60, 0 };
 
-static sim_state moduleState = SIM_INITIALIZING;
+static sim7600_config config;
+static const sim7600_client* clients[SIM7600_MAX_CLIENTS];
+static uint8_t clientCount = 0;
+static sim_state moduleState = SIM_UNINITIALIZED;
 static uint32_t stateEnteredAt = 0;
 static uint8_t tries = 0;
 static bool resetRequested = false;
 static uint32_t resetCount = 0;
+static const void* lockOwner = NULL;
+
+//-----------------------------------------------------------------------------
+// Helpers
+//-----------------------------------------------------------------------------
+
+uint32_t sim7600Seconds(void) {
+    return config.getSeconds ? config.getSeconds() : 0;
+}
+
+void sim7600Log(const char* fmt, ...) {
+    char msg[96];
+    va_list args;
+    if (config.log == NULL) {
+        return;
+    }
+    va_start(args, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+    config.log(msg);
+}
 
 static void setState(sim_state s) {
     if (s != moduleState) {
         tries = 0;
     }
     moduleState = s;
-    stateEnteredAt = getUptimeSeconds();
+    stateEnteredAt = sim7600Seconds();
+}
+
+static void setResetPin(bool level) {
+    if (config.setResetPin) {
+        config.setResetPin(level);
+    }
 }
 
 // strips CR/LF and surrounding spaces in place
@@ -59,17 +91,50 @@ static void cleanResponse(char* str) {
     str[j] = '\0';
 }
 
-// sends the command for the current state
-static void sendStateCommand() {
+static bool startsWith(const char* str, const char* prefix) {
+    return strncmp(str, prefix, strlen(prefix)) == 0;
+}
+
+// +CGREG: <n>,<stat>[,...]  stat 1 = registered home, 5 = registered roaming
+static bool isRegistered(const char* resp) {
+    const char* comma;
+    if (!startsWith(resp, "+CGREG: ")) {
+        return false;
+    }
+    comma = strchr(resp, ',');
+    return comma != NULL && (comma[1] == '1' || comma[1] == '5') && (comma[2] == 0 || comma[2] == ',');
+}
+
+static void notifyReset(void) {
+    uint8_t i;
+    lockOwner = NULL;
+    for (i = 0; i < clientCount; i++) {
+        if (clients[i]->onReset) {
+            clients[i]->onReset();
+        }
+    }
+}
+
+static void notifyReady(void) {
+    uint8_t i;
+    for (i = 0; i < clientCount; i++) {
+        if (clients[i]->onReady) {
+            clients[i]->onReady();
+        }
+    }
+}
+
+// sends the command for the current bring-up state
+static void sendStateCommand(void) {
     switch (moduleState) {
     case SIM_DISABLING_ECHO:
-        sendATCommand("ATE0");
+        sim7600SendCommand("ATE0");
         break;
     case SIM_CHECKING_SIM:
-        sendATCommand("AT+CPIN?");
+        sim7600SendCommand("AT+CPIN?");
         break;
     case SIM_WAITING_NETWORK:
-        sendATCommand("AT+CGREG?");
+        sim7600SendCommand("AT+CGREG?");
         break;
     default:
         break;
@@ -82,153 +147,201 @@ static void enterState(sim_state s) {
     sendStateCommand();
 }
 
-// +CGREG: <n>,<stat>[,...]  stat 1 = registered home, 5 = registered roaming
-static bool isRegistered(const char* resp) {
-    const char* comma;
-    if (!str_starts_with(resp, "+CGREG: ")) {
-        return false;
+// starts the hard reset sequence, sim7600Handler() steps through it
+static void startReset(void) {
+    sim7600Log("[SIM7600] Resetting modem");
+    resetCount++;
+    notifyReset();
+    sim7600SendCommand("AT+CRESET");   // soft reset as well, in case the pin reset has no effect
+    if (config.setResetPin) {
+        setResetPin(false);
+        setState(SIM_RESET_ASSERT);
     }
-    comma = str_char(resp, ',');
-    return comma != NULL && (comma[1] == '1' || comma[1] == '5') && (comma[2] == 0 || comma[2] == ',');
+    else {
+        setState(SIM_INITIALIZING);
+    }
 }
 
-void processATResponse(char* resp) {
-    cleanResponse(resp);
-    if (resp[0] == 0) { // if empty response
+//-----------------------------------------------------------------------------
+// Public API
+//-----------------------------------------------------------------------------
+
+bool sim7600Init(const sim7600_config* cfg) {
+    if (cfg == NULL || cfg->uartWrite == NULL || cfg->getSeconds == NULL) {
+        return false;
+    }
+    config = *cfg;
+    sim7600Log("[SIM7600] Initializing");
+    startReset();
+    return true;
+}
+
+bool sim7600RegisterClient(const sim7600_client* client) {
+    if (client == NULL || clientCount >= SIM7600_MAX_CLIENTS) {
+        return false;
+    }
+    clients[clientCount++] = client;
+    return true;
+}
+
+void sim7600SendCommand(const char* cmd) {
+    if (config.uartWrite == NULL) {
         return;
     }
+    sim7600Log("[SIM7600] > %s", cmd);
+    config.uartWrite(cmd);
+    config.uartWrite("\r");
+}
 
-    putsUart0("[SIM7600]: ");
-    putsUart0(resp);
-    putsUart0("\n");
+void sim7600SendSecretCommand(const char* cmd) {
+    if (config.uartWrite == NULL) {
+        return;
+    }
+    sim7600Log("[SIM7600] > (command hidden)");
+    config.uartWrite(cmd);
+    config.uartWrite("\r");
+}
+
+void sim7600SendRaw(const char* data) {
+    if (config.uartWrite == NULL) {
+        return;
+    }
+    sim7600Log("[SIM7600] > %s", data);
+    config.uartWrite(data);
+}
+
+bool sim7600IsReady(void) {
+    return moduleState == SIM_RUNNING;
+}
+
+void sim7600RequestReset(void) {
+    resetRequested = true;
+}
+
+bool sim7600Acquire(const void* owner) {
+    if (lockOwner == NULL || lockOwner == owner) {
+        lockOwner = owner;
+        return true;
+    }
+    return false;
+}
+
+void sim7600Release(const void* owner) {
+    if (lockOwner == owner) {
+        lockOwner = NULL;
+    }
+}
+
+const char* sim7600StateName(void) {
+    return moduleState < SIM_STATE_COUNT ? stateNames[moduleState] : "?";
+}
+
+uint32_t sim7600ResetCount(void) {
+    return resetCount;
+}
+
+void sim7600FeedLine(char* line) {
+    uint8_t i;
+    cleanResponse(line);
+    if (line[0] == 0) { // if empty response
+        return;
+    }
+    sim7600Log("[SIM7600] < %s", line);
 
     // the modem rebooted on its own (brown-out, crash): start over
-    if (moduleState != SIM_INITIALIZING && str_equal(resp, "RDY")) {
-        printShell("Unexpected modem restart\n");
-        mqttReset();
+    if (moduleState > SIM_INITIALIZING && strcmp(line, "RDY") == 0) {
+        sim7600Log("[SIM7600] Unexpected modem restart");
+        notifyReset();
         setState(SIM_INITIALIZING);
         return;
     }
 
     switch (moduleState) {
     case SIM_INITIALIZING:
-        if (str_equal(resp, "PB DONE")) {
+        if (strcmp(line, "PB DONE") == 0) {
             enterState(SIM_DISABLING_ECHO);
         }
         break;
     case SIM_DISABLING_ECHO:
-        if (str_equal(resp, "OK")) { // the "ATE0" echo line (if echo was on) is ignored
+        if (strcmp(line, "OK") == 0) { // the "ATE0" echo line (if echo was on) is ignored
             enterState(SIM_CHECKING_SIM);
         }
         break;
     case SIM_CHECKING_SIM:
-        if (str_equal(resp, "+CPIN: READY")) {
+        if (strcmp(line, "+CPIN: READY") == 0) {
             enterState(SIM_WAITING_NETWORK);
         }
         // anything else (SIM PIN, ERROR, ...) is retried on timeout
         break;
     case SIM_WAITING_NETWORK:
-        if (isRegistered(resp)) {
-            printShell("Registered on network\n");
-            mqttReset();
+        if (isRegistered(line)) {
+            sim7600Log("[SIM7600] Registered on network");
             setState(SIM_RUNNING);
+            notifyReady();
         }
         break;
     case SIM_RUNNING:
-        processMqttResponse(resp);
+        for (i = 0; i < clientCount; i++) {
+            if (clients[i]->onLine) {
+                clients[i]->onLine(line);
+            }
+        }
         break;
     default:
-        break;
+        break;  // lines during the reset sequence are ignored
     }
 }
 
-// hard reset via the reset pin. blocks ~10 s, keeps the watchdog fed
-static void resetSim7600() {
-    printShell("Resetting SIM7600\n");
-    sendATCommand("AT+CRESET");   // soft reset as well, in case the pin reset has no effect
-    resetCount++;
-    mqttReset();
-    //turning off
-    setPinValue(RST, 0);
-    waitMicrosecond(5e6);
-    feedWatchdog();
-    setPinValue(RST, 1);
-    //wait
-    waitMicrosecond(2e6);
-    feedWatchdog();
-    //turning on
-    setPinValue(RST, 0);
-    waitMicrosecond(3e6);
-    feedWatchdog();
-    setPinValue(RST, 1);
-    setState(SIM_INITIALIZING);
-}
-
-// safe to call from anywhere: the reset itself happens in sim7600Handler()
-void sim7600RequestReset() {
-    resetRequested = true;
-}
-
-void sendATCommand(const char* cmd) {
-    putsUart0("[TM4C]: ");
-    putsUart0(cmd);
-    putsUart0("\n");
-
-    putsUart1(cmd);
-    putcUart1('\r');
-}
-
-// call from the main loop
-void sim7600Handler() {
+void sim7600Handler(void) {
+    uint8_t i;
     uint32_t elapsed;
+    if (moduleState == SIM_UNINITIALIZED) {
+        return;
+    }
     if (resetRequested) {
         resetRequested = false;
-        resetSim7600();
+        startReset();
         return;
     }
     if (moduleState == SIM_RUNNING) {
-        mqttHandler(); //call mqtt state machine
+        for (i = 0; i < clientCount; i++) {
+            if (clients[i]->poll) {
+                clients[i]->poll();
+            }
+        }
         return;
     }
-    elapsed = getUptimeSeconds() - stateEnteredAt;
+    elapsed = sim7600Seconds() - stateEnteredAt;
     if (elapsed < stateTimeouts[moduleState]) {
         return;
     }
-    if (moduleState == SIM_INITIALIZING) {
+    switch (moduleState) {
+    case SIM_RESET_ASSERT:
+        setResetPin(true);
+        setState(SIM_RESET_RELEASE);
+        break;
+    case SIM_RESET_RELEASE:
+        setResetPin(false);
+        setState(SIM_RESET_POWER_ON);
+        break;
+    case SIM_RESET_POWER_ON:
+        setResetPin(true);
+        setState(SIM_INITIALIZING);
+        break;
+    case SIM_INITIALIZING:
         // missed PB DONE (or the modem was already up): probe it with ATE0
-        printShell("No PB DONE from modem, probing\n");
+        sim7600Log("[SIM7600] No PB DONE from modem, probing");
         enterState(SIM_DISABLING_ECHO);
+        break;
+    default:
+        if (tries >= stateMaxTries[moduleState]) {
+            sim7600Log("[SIM7600] Not responding in state %s", sim7600StateName());
+            startReset();
+        }
+        else {
+            stateEnteredAt = sim7600Seconds();
+            sendStateCommand(); // retry
+        }
+        break;
     }
-    else if (tries >= stateMaxTries[moduleState]) {
-        printShell("Modem not responding in state ");
-        putsUart0(getSim7600StateName());
-        putcUart0('\n');
-        resetSim7600();
-    }
-    else {
-        stateEnteredAt = getUptimeSeconds();
-        sendStateCommand(); // retry
-    }
-}
-
-const char* getSim7600StateName() {
-    return moduleState < SIM_STATE_COUNT ? stateNames[moduleState] : "?";
-}
-
-uint32_t getSim7600ResetCount() {
-    return resetCount;
-}
-
-void initSim7600() {
-    initUart1();
-    setUart1BaudRate(115200, 40e6);
-    setUart1Callback(processATResponse);
-    enableUart1RxInt();
-    enableNvicInterrupt(INT_UART1);
-
-    enablePort(PORTA);
-    selectPinPushPullOutput(RST);
-
-    printShell("Initializing UART1 (SIM7600A-H)\n");
-    resetSim7600();
 }
